@@ -1,0 +1,11 @@
+#
+# Cargo Configuration for the https://github.com/rp-rs/rp-hal.git repository.
+#
+# You might want to make a similar file in your own repository if you are
+# writing programs for Raspberry Pi microcontrollers.
+#
+
+[build]
+# Set the default target to match the Cortex-M0+ in the RP2040
+target = "i686-pc-windows-gnu"
+

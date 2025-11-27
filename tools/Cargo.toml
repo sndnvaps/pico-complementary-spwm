@@ -1,0 +1,12 @@
+[package]
+name = "pico_complementary_spwm-calculator"
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/sndnvaps/pico-complementary-spwm"
+authors = ["Samuel Freeman <admin@sndnvaps.com>"]
+license = "MIT/Apache-2.0"
+categories = ["no-std", "embedded"]
+
+[dependencies]
+
+
