@@ -1,6 +1,6 @@
 [package]
 name = "pico_complementary_spwm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 repository = "https://github.com/sndnvaps/pico-complementary-spwm"
 authors = ["Samuel Freeman <admin@sndnvaps.com>"]
@@ -8,6 +8,7 @@ license = "MIT/Apache-2.0"
 categories = ["no-std", "embedded"]
 
 [dependencies]
+critical-section = {version = "1.2.0"}
 rp-pico = "0.9.0"
 rp2040-hal = "0.10.1"
 embedded-hal = "1.0.0"

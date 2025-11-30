@@ -1,21 +1,39 @@
 #![no_std]
 #![no_main]
 
-use rp_pico::entry;
-//use cortex_m_rt::entry;
+use defmt::info;
+use embedded_hal::digital::OutputPin;
 use embedded_hal::pwm::SetDutyCycle;
 use panic_halt as _;
 use rp2040_hal::{
     clocks::{init_clocks_and_plls, Clock},
-    pac,
+    gpio::{self, Interrupt},
+    pac::{self, interrupt},
     pwm::Slices,
     sio::Sio,
     watchdog::Watchdog,
 };
+use rp_pico::entry;
+// The GPIO interrupt type we're going to generate
+use rp2040_hal::gpio::Interrupt::EdgeLow;
+
+use core::cell::RefCell;
+use critical_section::Mutex;
 
 use rp_pico::XOSC_CRYSTAL_FREQ;
 
-//use lazy_static::lazy_static;
+//初始化pwm_enabled状态为false,开机的时候不输出信号
+//需要按下usr_btn后，才输出pwm信号，再次按下usr_btn暂停pwm信号输出
+static mut BUTTON_PRESSED: bool = false;
+
+/// This pin will be our interrupt source.
+/// It will trigger an interrupt if pulled to ground (via a switch or jumper wire)
+/// usr btn defind as gpio24
+type ButtonPin = gpio::Pin<gpio::bank0::Gpio24, gpio::FunctionSioInput, gpio::PullUp>;
+/// This how we transfer our Led and Button pins into the Interrupt Handler.
+/// We'll have the option hold both using the LedAndButton type.
+/// This will make it a bit easier to unpack them later.
+static GLOBAL_PINS: Mutex<RefCell<Option<ButtonPin>>> = Mutex::new(RefCell::new(None));
 
 const SAMPLE_POINTS: usize = 100; // 正弦波采样点数
 const SINE_FREQ: u32 = 50; // 正弦波频率(Hz)
@@ -130,7 +148,6 @@ static COMPLEMENTARY_SINE_TABLE: [(u16, u16); SAMPLE_POINTS] = {
     comple_sine_table
 };
 
-
 #[entry]
 fn main() -> ! {
     let mut pac = pac::Peripherals::take().unwrap();
@@ -153,13 +170,29 @@ fn main() -> ! {
 
     let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
 
-    // 配置GPIO引脚
-    let pins = rp_pico::Pins::new(
+    // 配置GPIO引脚为button_pin
+    let pins = rp2040_hal::gpio::Pins::new(
         pac.IO_BANK0,
         pac.PADS_BANK0,
         sio.gpio_bank0,
         &mut pac.RESETS,
     );
+
+    //led ws2812 is in gpio23
+    let mut led_pin = pins.gpio25.into_push_pull_output();
+
+    // 配置GPIO按钮并启用中断
+    let button_pin = pins.gpio24.reconfigure();
+    button_pin.set_interrupt_enabled(Interrupt::EdgeLow, true);
+
+    // Give away our pins by moving them into the `GLOBAL_PINS` variable.
+    // We won't need to access them in the main thread again
+    critical_section::with(|cs| {
+        GLOBAL_PINS.borrow(cs).replace(Some(button_pin));
+    });
+    unsafe {
+        cortex_m::peripheral::NVIC::unmask(pac::Interrupt::IO_IRQ_BANK0);
+    }
 
     // 配置PWM切片0（主通道和互补通道）
     let pwm_slices_0 = Slices::new(pac.PWM, &mut pac.RESETS);
@@ -183,17 +216,67 @@ fn main() -> ! {
     let mut channel_b = pwm.channel_b;
     let _pwm_comp_pin = channel_b.output_to(pins.gpio15);
 
+    //等待中断信号。接收到信号后，再执行主循环
+    //开机后，按下usr按键，将启动pwm信号输出
+    //启动pwm信号输出后，再按下usr按键，将暂停pwm信号输出
+    cortex_m::asm::wfi();
+    let mut pressed: bool = Default::default();
+    cortex_m::interrupt::free(|_cs| {
+        pressed = unsafe { BUTTON_PRESSED };
+    });
+
     // 主循环：生成互补SPWM信号
     loop {
-        for &(main_duty, comp_duty) in COMPLEMENTARY_SINE_TABLE.iter() {
-            // 设置主通道占空比
-            let _ = channel_a.set_duty_cycle(main_duty.into());
-            // 设置互补通道占空比
-            let _ = channel_b.set_duty_cycle(comp_duty.into());
+        if pressed {
+            led_pin.set_high().unwrap();
+            info!("State changed: Running");
+            for &(main_duty, comp_duty) in COMPLEMENTARY_SINE_TABLE.iter() {
+                // 设置主通道占空比
+                let _ = channel_a.set_duty_cycle(main_duty.into());
+                // 设置互补通道占空比
+                let _ = channel_b.set_duty_cycle(comp_duty.into());
 
-            // 计算每个采样点的延迟时间
-            let delay_us = 1_000_000 / (SINE_FREQ * SAMPLE_POINTS as u32);
-            delay.delay_us(delay_us);
+                // 计算每个采样点的延迟时间
+                let delay_us = 1_000_000 / (SINE_FREQ * SAMPLE_POINTS as u32);
+                delay.delay_us(delay_us);
+            }
+        } else {
+            led_pin.set_low().unwrap();
+            info!("State changed: Paused");
+            // 设置主通道占空比为0
+            let _ = channel_a.set_duty_cycle(0);
+            // 设置互补通道占空比
+            let _ = channel_b.set_duty_cycle(0);
+        }
+        //等待中断，收到usr按键信号后暂停输出
+        cortex_m::interrupt::free(|_cs| {
+            pressed = unsafe { BUTTON_PRESSED };
+        });
+    }
+}
+
+#[allow(static_mut_refs)] // See https://github.com/rust-embedded/cortex-m/pull/561
+#[interrupt]
+fn IO_IRQ_BANK0() {
+    static mut BTN_IRQ: Option<ButtonPin> = None;
+    if BTN_IRQ.is_none() {
+        critical_section::with(|cs| {
+            *BTN_IRQ = GLOBAL_PINS.borrow(cs).take();
+        });
+    }
+
+    if let Some(gpios) = BTN_IRQ {
+        let btn = gpios;
+        if btn.interrupt_status(EdgeLow) {
+            unsafe {
+                //BUTTON_PRESSED = true;
+                BUTTON_PRESSED = !BUTTON_PRESSED;
+            }
+            // Our interrupt doesn't clear itself.
+            // Do that now so we don't immediately jump back to this interrupt handler.
+            btn.clear_interrupt(EdgeLow);
+            // 简单防抖延迟
+            cortex_m::asm::delay(50_000);
         }
     }
 }
