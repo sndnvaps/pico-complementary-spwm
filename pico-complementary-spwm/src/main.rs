@@ -22,9 +22,11 @@ use critical_section::Mutex;
 
 use rp_pico::XOSC_CRYSTAL_FREQ;
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 //初始化pwm_enabled状态为false,开机的时候不输出信号
 //需要按下usr_btn后，才输出pwm信号，再次按下usr_btn暂停pwm信号输出
-static mut BUTTON_PRESSED: bool = false;
+static PWM_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// This pin will be our interrupt source.
 /// It will trigger an interrupt if pulled to ground (via a switch or jumper wire)
@@ -178,7 +180,7 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
-    //led ws2812 is in gpio23
+    //led is in gpio25
     let mut led_pin = pins.gpio25.into_push_pull_output();
 
     // 配置GPIO按钮并启用中断
@@ -219,15 +221,9 @@ fn main() -> ! {
     //等待中断信号。接收到信号后，再执行主循环
     //开机后，按下usr按键，将启动pwm信号输出
     //启动pwm信号输出后，再按下usr按键，将暂停pwm信号输出
-    cortex_m::asm::wfi();
-    let mut pressed: bool = Default::default();
-    cortex_m::interrupt::free(|_cs| {
-        pressed = unsafe { BUTTON_PRESSED };
-    });
-
     // 主循环：生成互补SPWM信号
     loop {
-        if pressed {
+        if PWM_ENABLED.load(Ordering::Relaxed) {
             led_pin.set_high().unwrap();
             info!("State changed: Running");
             for &(main_duty, comp_duty) in COMPLEMENTARY_SINE_TABLE.iter() {
@@ -248,10 +244,8 @@ fn main() -> ! {
             // 设置互补通道占空比
             let _ = channel_b.set_duty_cycle(0);
         }
-        //等待中断，收到usr按键信号后暂停输出
-        cortex_m::interrupt::free(|_cs| {
-            pressed = unsafe { BUTTON_PRESSED };
-        });
+        // 短暂延时
+        cortex_m::asm::delay(1000);
     }
 }
 
@@ -268,10 +262,10 @@ fn IO_IRQ_BANK0() {
     if let Some(gpios) = BTN_IRQ {
         let btn = gpios;
         if btn.interrupt_status(EdgeLow) {
-            unsafe {
-                //BUTTON_PRESSED = true;
-                BUTTON_PRESSED = !BUTTON_PRESSED;
-            }
+            // 切换PWM使能状态
+            let current_state = PWM_ENABLED.load(Ordering::Relaxed);
+            PWM_ENABLED.store(!current_state, Ordering::Relaxed);
+
             // Our interrupt doesn't clear itself.
             // Do that now so we don't immediately jump back to this interrupt handler.
             btn.clear_interrupt(EdgeLow);
